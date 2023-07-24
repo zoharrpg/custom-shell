@@ -228,7 +228,21 @@ bool builtin_command(struct cmdline_tokens *tokens) {
 
     if (tokens->builtin == BUILTIN_JOBS) {
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
-        list_jobs(STDOUT_FILENO);
+        if (tokens->outfile != NULL) {
+            int fd;
+            if ((fd = open(tokens->outfile, O_WRONLY | O_CREAT | O_TRUNC,
+                           DEF_MODE)) < 0) {
+                perror(tokens->outfile);
+
+            } else {
+                list_jobs(fd);
+            }
+            close(fd);
+
+        } else {
+            list_jobs(STDOUT_FILENO);
+        }
+
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
         return true;
@@ -257,10 +271,11 @@ void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
     pid_t pid;
-    sigset_t mask, prev_mask;
+    sigset_t mask, prev_mask, wait_mask;
     sigaddset(&mask, SIGCHLD);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTSTP);
+    sigemptyset(&wait_mask);
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -276,12 +291,59 @@ void eval(const char *cmdline) {
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
         if ((pid = fork()) == 0) {
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            int olderrno;
 
             setpgid(pid, pid);
+            if (token.infile != NULL) {
+                int fd;
+                olderrno = errno;
+                if ((fd = open(token.infile, O_RDONLY, DEF_MODE)) < 0) {
+                    if (errno == EACCES) {
+                        sio_printf("%s: Permission denied\n", token.infile);
+                        errno = olderrno;
+                        exit(1);
+                    }
+
+                    sio_printf("%s: No such file or directory\n", token.infile);
+
+                    exit(1);
+
+                } else {
+                    dup2(fd, STDIN_FILENO);
+                }
+                close(fd);
+            }
+
+            if (token.outfile != NULL) {
+                int fd;
+                olderrno = errno;
+                if ((fd = open(token.outfile, O_WRONLY | O_CREAT | O_TRUNC,
+                               DEF_MODE)) < 0) {
+                    if (errno == EACCES) {
+                        sio_printf("%s: Permission denied\n", token.outfile);
+                        errno = olderrno;
+                        exit(1);
+                    }
+                    sio_printf("%s: No such file or directory\n",
+                               token.outfile);
+                    exit(1);
+
+                } else {
+                    dup2(fd, STDOUT_FILENO);
+                }
+            }
+            olderrno = errno;
 
             // sigprocmask(SIG_SETMASK, &free_all, NULL);
             if (execve(token.argv[0], token.argv, environ) < 0) {
-                sio_printf("%s: Command not found.\n", token.argv[0]);
+                if (errno == EACCES) {
+                    sio_printf("%s: Permission denied\n", token.argv[0]);
+                    errno = olderrno;
+                    exit(1);
+                }
+
+                sio_printf("%s: No such file or directory\n", token.argv[0]);
+
                 exit(0);
             }
         } else {
@@ -291,7 +353,7 @@ void eval(const char *cmdline) {
 
                 while (fg_job() > 0) {
 
-                    sigsuspend(&prev_mask);
+                    sigsuspend(&wait_mask);
                 }
 
                 sigprocmask(SIG_SETMASK, &prev_mask, NULL);
