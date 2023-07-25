@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -217,6 +218,7 @@ void process_bg_fg_command(struct cmdline_tokens *tokens) {
 
 bool builtin_command(struct cmdline_tokens *tokens) {
     sigset_t mask, prev_mask;
+    sigemptyset(&mask);
     sigaddset(&mask, SIGCHLD);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTSTP);
@@ -231,7 +233,7 @@ bool builtin_command(struct cmdline_tokens *tokens) {
         if (tokens->outfile != NULL) {
             int fd;
             if ((fd = open(tokens->outfile, O_WRONLY | O_CREAT | O_TRUNC,
-                           DEF_MODE)) < 0) {
+                           DEFFILEMODE)) < 0) {
                 perror(tokens->outfile);
 
             } else {
@@ -291,20 +293,13 @@ void eval(const char *cmdline) {
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
         if ((pid = fork()) == 0) {
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-            int olderrno;
 
             setpgid(pid, pid);
             if (token.infile != NULL) {
                 int fd;
-                olderrno = errno;
-                if ((fd = open(token.infile, O_RDONLY, DEF_MODE)) < 0) {
-                    if (errno == EACCES) {
-                        sio_printf("%s: Permission denied\n", token.infile);
-                        errno = olderrno;
-                        exit(1);
-                    }
+                if ((fd = open(token.infile, O_RDONLY, DEFFILEMODE)) < 0) {
 
-                    sio_printf("%s: No such file or directory\n", token.infile);
+                    perror(token.infile);
 
                     exit(1);
 
@@ -316,35 +311,21 @@ void eval(const char *cmdline) {
 
             if (token.outfile != NULL) {
                 int fd;
-                olderrno = errno;
                 if ((fd = open(token.outfile, O_WRONLY | O_CREAT | O_TRUNC,
-                               DEF_MODE)) < 0) {
-                    if (errno == EACCES) {
-                        sio_printf("%s: Permission denied\n", token.outfile);
-                        errno = olderrno;
-                        exit(1);
-                    }
-                    sio_printf("%s: No such file or directory\n",
-                               token.outfile);
+                               DEFFILEMODE)) < 0) {
+
+                    perror(token.outfile);
                     exit(1);
 
                 } else {
                     dup2(fd, STDOUT_FILENO);
                 }
             }
-            olderrno = errno;
-
             // sigprocmask(SIG_SETMASK, &free_all, NULL);
             if (execve(token.argv[0], token.argv, environ) < 0) {
-                if (errno == EACCES) {
-                    sio_printf("%s: Permission denied\n", token.argv[0]);
-                    errno = olderrno;
-                    exit(1);
-                }
+                perror(token.argv[0]);
 
-                sio_printf("%s: No such file or directory\n", token.argv[0]);
-
-                exit(0);
+                exit(1);
             }
         } else {
 
@@ -391,10 +372,15 @@ void sigchld_handler(int sig) {
 
         jid_t jid = job_from_pid(pid);
 
+        if (WIFEXITED(status)) {
+            delete_job(jid);
+        }
+
         if (WIFSIGNALED(status)) {
 
             sio_printf("Job [%d] (%d) terminated by signal %d\n", jid, pid,
                        WTERMSIG(status));
+            delete_job(jid);
         }
         if (WIFSTOPPED(status)) {
 
@@ -402,9 +388,6 @@ void sigchld_handler(int sig) {
                        WSTOPSIG(status));
 
             job_set_state(jid, ST);
-        }
-        if (job_get_state(jid) == BG || job_get_state(jid) == FG) {
-            delete_job(jid);
         }
     }
     sigprocmask(SIG_SETMASK, &prev, NULL);
