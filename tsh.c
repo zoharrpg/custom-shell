@@ -355,8 +355,8 @@ void eval(const char *cmdline) {
             // unblock the signal
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             // put the child in a new process group whose group ID is identical
-            // to the child’s PID. This would ensure that there will be only one
-            // process, your shell, in the foreground process group.
+            // to the child PID. This would ensure that there will be only one
+            // process, your shell, in the foreground process group
             setpgid(pid, pid);
             // check redirection IO input file and output error message
             if (token.infile != NULL) {
