@@ -163,18 +163,37 @@ int main(int argc, char **argv) {
     return -1; // control never reaches here
 }
 
+/**
+ * @brief The function `process_bg_fg_command` processes a background or
+ * foreground command by obtaining the process ID or job ID, setting the job
+ * state, and  send SIGCONT to make the process to run background and foreground
+ * The bg job command resumes job by sending it a SIGCONT signal, and then runs
+ * it in the background. The job argument can be either a PID or a JID. The fg
+ * job command resumes job by sending it a SIGCONT signal, and then runs it in
+ * the foreground. The job argument can be either a PID or a JID
+ *
+ * @param tokens A pointer to a struct cmdline_tokens, which contains
+ * information about the command and its arguments.
+ *
+ * @return The function does not have a return type specified, so it does not
+ * explicitly return a value.
+ */
 void process_bg_fg_command(struct cmdline_tokens *tokens) {
 
     pid_t pid;
     jid_t jid;
+    // error handling for input pid or job id
     if (tokens->argv[1] == NULL) {
         sio_printf("%s command requires PID or %%jobid argument\n",
                    tokens->argv[0]);
         return;
     }
+    // check if the input is job id, job id start with %
     if (tokens->argv[1][0] == '%') {
         jid = atoi(&tokens->argv[1][1]);
+        // check job id valid and exist
         if (jid > 0 && job_exists(jid)) {
+            // get pid of the job id
             pid = job_get_pid(jid);
 
         } else {
@@ -188,7 +207,9 @@ void process_bg_fg_command(struct cmdline_tokens *tokens) {
 
             return;
         }
+        // get pid from the users
     } else if ((pid = atoi(&tokens->argv[1][0])) > 0 && job_from_pid(pid)) {
+        // get jid of the pid
         jid = job_from_pid(pid);
 
     } else {
@@ -202,12 +223,17 @@ void process_bg_fg_command(struct cmdline_tokens *tokens) {
 
         return;
     }
+    // get the state of the background or foreground
     job_state state = tokens->builtin == BUILTIN_BG ? BG : FG;
+    // sent SIGCONT signal
     kill(-pid, SIGCONT);
+    // Set the state of the job
     job_set_state(jid, state);
+    // if job is background job just outout the jid and pid
     if (state == BG) {
         sio_printf("[%d] (%d) %s\n", jid, pid, job_get_cmdline(jid));
     } else {
+        // otherwise wait until it exited
         sigset_t mask;
         sigemptyset(&mask);
         while (fg_job() > 0) {
@@ -216,32 +242,51 @@ void process_bg_fg_command(struct cmdline_tokens *tokens) {
     }
 }
 
+/**
+ * @brief The function checks if the given command is a built-in command and
+ * performs the corresponding action.
+ *
+ * @param tokens The `tokens` parameter is a pointer to a `struct
+ * cmdline_tokens` object. This object contains information about the command
+ * line tokens parsed by the shell. It includes fields such as `builtin` (which
+ * represents the type of builtin command), `outfile` (which represents the
+ * output file for the command
+ *
+ * @return True if it is a builtin command
+ */
 bool builtin_command(struct cmdline_tokens *tokens) {
     sigset_t mask, prev_mask;
+    // initialize mask
     sigemptyset(&mask);
     sigaddset(&mask, SIGCHLD);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTSTP);
-
+    // quit to exit the shell
     if (tokens->builtin == BUILTIN_QUIT) {
 
         exit(0);
     }
-
+    // jobs to list the jobs
     if (tokens->builtin == BUILTIN_JOBS) {
+        // block signal during the list jobs operations
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+        // check if there is IO redirection
+
         if (tokens->outfile != NULL) {
             int fd;
+            // open file and if it is not successful, output error message
             if ((fd = open(tokens->outfile, O_WRONLY | O_CREAT | O_TRUNC,
                            DEFFILEMODE)) < 0) {
                 perror(tokens->outfile);
 
             } else {
+                // list jobs to the specific file descriptor
                 list_jobs(fd);
             }
             close(fd);
 
         } else {
+            // list jobs to stdout
             list_jobs(STDOUT_FILENO);
         }
 
@@ -250,8 +295,10 @@ bool builtin_command(struct cmdline_tokens *tokens) {
         return true;
     }
 
+    // bg or fg command case
     if (tokens->builtin == BUILTIN_BG || tokens->builtin == BUILTIN_FG) {
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+        // process bg or fg job command
         process_bg_fg_command(tokens);
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return true;
@@ -259,24 +306,33 @@ bool builtin_command(struct cmdline_tokens *tokens) {
 
     return false;
 }
+
 /**
- * @brief <What does eval do?>
+ * @brief  The eval function evaluates a command line input, parses it, and
+ * executes the command if it is not a built-in command. Support background and
+ * forground jobs
  *
- * TODO: Delete this comment and replace it with your own.
+ * @param cmdline A string containing the command line input from the user.
  *
- * NOTE: The shell is supposed to be a long-running process, so this function
- *       (and its helpers) should avoid exiting on error.  This is not to say
- *       they shouldn't detect and print (or otherwise handle) errors!
  */
 void eval(const char *cmdline) {
-
+    // parse result of the command
+    // PARSELINE_FG = 4,    ///< Foreground job
+    // PARSELINE_BG = 5,    ///< Background job
+    // PARSELINE_EMPTY = 6, ///< Empty cmdline
+    // PARSELINE_ERROR = 7, ///< Parse error
     parseline_return parse_result;
+    // cmdline token
     struct cmdline_tokens token;
+    // process id
     pid_t pid;
     sigset_t mask, prev_mask, wait_mask;
+
+    // initialize the mask
     sigaddset(&mask, SIGCHLD);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTSTP);
+    // mask for sigsuspend
     sigemptyset(&wait_mask);
 
     // Parse command line
@@ -285,16 +341,24 @@ void eval(const char *cmdline) {
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
         return;
     }
-
+    // state of the jobs, background or forground
     job_state state = parse_result == PARSELINE_BG ? BG : FG;
 
+    // if it is not builtin command, block the signal , and create a children
+    // process to execute the program the user input
     if (!builtin_command(&token)) {
 
         sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+        // create the child process,
         if ((pid = fork()) == 0) {
+            // child process part
+            // unblock the signal
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-
+            // put the child in a new process group whose group ID is identical
+            // to the child’s PID. This would ensure that there will be only one
+            // process, your shell, in the foreground process group.
             setpgid(pid, pid);
+            // check redirection IO input file and output error message
             if (token.infile != NULL) {
                 int fd;
                 if ((fd = open(token.infile, O_RDONLY, DEFFILEMODE)) < 0) {
@@ -304,11 +368,13 @@ void eval(const char *cmdline) {
                     exit(1);
 
                 } else {
+                    // redirection the fd
                     dup2(fd, STDIN_FILENO);
                 }
                 close(fd);
             }
 
+            // check redirection IO output file and output error message
             if (token.outfile != NULL) {
                 int fd;
                 if ((fd = open(token.outfile, O_WRONLY | O_CREAT | O_TRUNC,
@@ -318,18 +384,22 @@ void eval(const char *cmdline) {
                     exit(1);
 
                 } else {
+                    // redirection the fd
                     dup2(fd, STDOUT_FILENO);
                 }
             }
-            // sigprocmask(SIG_SETMASK, &free_all, NULL);
+            // execute the program
             if (execve(token.argv[0], token.argv, environ) < 0) {
                 perror(token.argv[0]);
 
                 exit(1);
             }
         } else {
+            // parent process part
 
+            // Check whether it is background or foreground job
             if (parse_result == PARSELINE_FG) {
+                // add job list wait until it finished
                 add_job(pid, state, cmdline);
 
                 while (fg_job() > 0) {
@@ -340,15 +410,15 @@ void eval(const char *cmdline) {
                 sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
             } else {
-                jid_t jid = add_job(pid, state, cmdline);
 
+                jid_t jid = add_job(pid, state, cmdline);
+                // background job output it jid and pid to user.
                 sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
+                // after all operation, unblock signal in the parent process
                 sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             }
         }
     }
-
-    // TODO: Implement commands here.
 }
 
 /*****************
@@ -356,32 +426,42 @@ void eval(const char *cmdline) {
  *****************/
 
 /**
- * @brief <What does sigchld_handler do?>
+ * @brief The function `sigchld_handler` handles the SIGCHLD signal, which is
+ * sent when a child process changes state, and reaping child processes
  *
- * TODO: Delete this comment and replace it with your own.
+ * @param sig The parameter `sig` is the signal number that triggered the signal
+ * handler. In this case, the signal handler is for the `SIGCHLD` signal, which
+ * is sent to the parent process when a child process terminates or stops.
+ *
  */
 void sigchld_handler(int sig) {
     int olderrno = errno;
     int status;
     pid_t pid;
     sigset_t mask, prev;
+
     sigfillset(&mask);
+    // block signal during the reaping child processes
     sigprocmask(SIG_BLOCK, &mask, &prev);
 
     while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
 
         jid_t jid = job_from_pid(pid);
-
+        // if the child process exit normally, just delete the job from joblist
         if (WIFEXITED(status)) {
             delete_job(jid);
         }
 
+        // if the job is terminated by signal SIGINT, output terminated message
+        // and delete job from joblist
         if (WIFSIGNALED(status)) {
 
             sio_printf("Job [%d] (%d) terminated by signal %d\n", jid, pid,
                        WTERMSIG(status));
             delete_job(jid);
         }
+        // if the job is stop by signal SIGINT, output stopped message and
+        // change the state job
         if (WIFSTOPPED(status)) {
 
             sio_printf("Job [%d] (%d) stopped by signal %d\n", jid, pid,
@@ -396,9 +476,13 @@ void sigchld_handler(int sig) {
 }
 
 /**
- * @brief <What does sigint_handler do?>
+ * @brief The function `sigint_handler` handles the SIGINT signal by sending it
+ * to the foreground job's, terminated the job
  *
- * TODO: Delete this comment and replace it with your own.
+ * @param sig The parameter `sig` is the signal number that triggered the signal
+ * handler. In this case, the signal handler is for the SIGINT signal, which is
+ * typically sent to a process when the user presses Ctrl+C on the keyboard.
+ *
  */
 void sigint_handler(int sig) {
     int olderrno = errno;
@@ -409,7 +493,7 @@ void sigint_handler(int sig) {
     sigfillset(&mask_all);
     sigprocmask(SIG_BLOCK, &mask_all, &prev);
     if ((jid = fg_job()) > 0) {
-        // sio_printf("the jid is %d\n",jid);
+
         pid = job_get_pid(jid);
 
         kill(-pid, SIGINT);
@@ -420,9 +504,12 @@ void sigint_handler(int sig) {
 }
 
 /**
- * @brief <What does sigtstp_handler do?>
+ * @brief The sigtstp_handler function sends a SIGTSTP signal to the stop
+ * foreground job's process group.
  *
- * TODO: Delete this comment and replace it with your own.
+ * @param sig The parameter "sig" is the signal number that triggered the signal
+ * handler. In this case, the signal handler is for the SIGTSTP signal.
+ *
  */
 void sigtstp_handler(int sig) {
     int olderrno = errno;
